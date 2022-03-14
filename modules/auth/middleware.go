@@ -5,8 +5,13 @@
 package auth
 
 import (
+	"math/rand"
 	"net/http"
 	"net/url"
+	"strings"
+	"time"
+
+	gocontext "context"
 
 	"github.com/GoAdminGroup/go-admin/context"
 	"github.com/GoAdminGroup/go-admin/modules/config"
@@ -19,6 +24,8 @@ import (
 	"github.com/GoAdminGroup/go-admin/plugins/admin/models"
 	template2 "github.com/GoAdminGroup/go-admin/template"
 	"github.com/GoAdminGroup/go-admin/template/types"
+
+	"github.com/coreos/go-oidc"
 )
 
 // Invoker contains the callback functions which are used
@@ -28,6 +35,9 @@ type Invoker struct {
 	authFailCallback       MiddlewareCallback
 	permissionDenyCallback MiddlewareCallback
 	conn                   db.Connection
+	// for OIDC
+	provider *oidc.Provider
+	verifier *oidc.IDTokenVerifier
 }
 
 // Middleware is the default auth middleware of plugins.
@@ -37,8 +47,17 @@ func Middleware(conn db.Connection) context.Handler {
 
 // DefaultInvoker return a default Invoker.
 func DefaultInvoker(conn db.Connection) *Invoker {
+	provider, err := oidc.NewProvider(gocontext.Background(), config.GetOIDCIssuerURL())
+	if err != nil {
+		panic(err)
+	}
+
+	verifier := provider.Verifier(&oidc.Config{ClientID: config.GetOIDCClientID(), SupportedSigningAlgs: []string{}})
+
 	return &Invoker{
-		prefix: config.Prefix(),
+		provider: provider,
+		verifier: verifier,
+		prefix:   config.Prefix(),
 		authFailCallback: func(ctx *context.Context) {
 			if ctx.Request.URL.Path == config.Url(config.GetLoginUrl()) {
 				return
@@ -125,7 +144,7 @@ type MiddlewareCallback func(ctx *context.Context)
 // Middleware get the auth middleware from Invoker.
 func (invoker *Invoker) Middleware() context.Handler {
 	return func(ctx *context.Context) {
-		user, authOk, permissionOk := Filter(ctx, invoker.conn)
+		user, authOk, permissionOk := invoker.Filter(ctx, invoker.conn)
 
 		if authOk && permissionOk {
 			ctx.SetUserValue("user", user)
@@ -150,7 +169,7 @@ func (invoker *Invoker) Middleware() context.Handler {
 
 // Filter retrieve the user model from Context and check the permission
 // at the same time.
-func Filter(ctx *context.Context, conn db.Connection) (models.UserModel, bool, bool) {
+func (invoker *Invoker) Filter(ctx *context.Context, conn db.Connection) (models.UserModel, bool, bool) {
 	var (
 		id float64
 		ok bool
@@ -164,17 +183,133 @@ func Filter(ctx *context.Context, conn db.Connection) (models.UserModel, bool, b
 		return user, false, false
 	}
 
-	if id, ok = ses.Get("user_id").(float64); !ok {
+	// すでにセッションクッキーからIDを取得できるときは、そのIDを使う
+	if id, ok = ses.Get("user_id").(float64); ok {
+		if user, ok = GetCurUserByID(int64(id), conn); ok {
+			return user, true, CheckPermissions(user, ctx.Request.URL.String(), ctx.Method(), ctx.PostForm())
+		}
+	}
+
+	user.Conn = conn
+	username := ""
+	nickname := ""
+
+	if username = ctx.Request.Header.Get("X-Zero-Username"); len(username) > 0 {
+		// ZEROAUTHを通過していれば、X-Zero-Usernameの値（マスターID）をユーザー名として使う
+		// どうやってバリデーションしようか
+		user = user.FindByUserName(username)
+		nickname = username
+	} else if authorization := ctx.Request.Header.Get("Authorization"); strings.HasPrefix(strings.ToLower(authorization), "bearer ") {
+		// まだセッションがなくても、AuthorizationヘッダでIDトークンを入手できれば使う
+		// IDトークンが失効しているなど、不正であればエラー
+		rawIDtoken := authorization[7:]
+		idtoken, err := invoker.verifier.Verify(gocontext.Background(), rawIDtoken)
+		if err != nil {
+			logger.Info("idtoken verification failed: ", rawIDtoken)
+			return user, false, false
+		}
+
+		logger.Infof("authenticated user: %s", idtoken.Subject)
+
+		// goadmin_usersテーブルのnameとIDトークンのsubjectが一致することを期待している
+		username = idtoken.Subject
+		nickname = getNickname(idtoken)
+		user = user.FindByUserName(username)
+	} else {
+		logger.Info("authorization header invalid: ", authorization)
 		return user, false, false
 	}
 
-	user, ok = GetCurUserByID(int64(id), conn)
+	if user.Id == 0 {
+		// Authorizationヘッダに正常なIDトークンが指定されたが、対応するユーザーが存在しない
+		// 自動的に goadmin_users と users にアカウントを作成する
+		if user, err = createUser(user, username, nickname); err != nil {
+			logger.Info("unknown user and creatin failed: ", username)
+			return user, false, false
+		}
+	}
 
-	if !ok {
+	if user.Id == 0 {
+		logger.Info("unknown user: ", username)
+		return user, false, false
+	}
+
+	user = user.WithRoles().WithPermissions().WithMenus()
+
+	// すべて正常なのでセッションを作成してクッキーに保存する
+	if err := SetCookie(ctx, user, conn); err != nil {
+		logger.Error("set cookie failed: ", err)
 		return user, false, false
 	}
 
 	return user, true, CheckPermissions(user, ctx.Request.URL.String(), ctx.Method(), ctx.PostForm())
+}
+
+func createUser(user models.UserModel, username, nickname string) (models.UserModel, error) {
+	// goadmin_usersにアカウントを作成する。パスワードは使わないのでランダムな文字列を設定する
+	// avatarは面倒なので設定しない
+	u, err := user.New(username, generatePassword(40), nickname, "")
+	if err != nil {
+		return u, err
+	}
+
+	// ToDo: 管理職であれば、ChargecodeOwner, ProjectOwner, GroupOwnerロールを設定する。暫定的に全員につける
+	// ToDo: SlugからRoleIDを検索するとエラーになってしまうため、いったんIDを直書きしている。あとで調査
+	if err := bindRole(u, []string{"2"}); err != nil {
+		logger.Error("bind role failed", err)
+		return u, err
+	}
+
+	return u, err
+}
+
+func getNickname(idtoken *oidc.IDToken) string {
+	var claims struct {
+		Email             string `json:"email"`
+		PrefferedUsername string `json:"preferred_username"`
+	}
+
+	if err := idtoken.Claims(&claims); err != nil {
+		return idtoken.Subject
+	}
+
+	// どのクレームを取得できるかわからないので、以下の優先順位であるものを使う
+	nickname := ""
+	if len(claims.Email) > 0 {
+		nickname = claims.Email
+	} else if len(claims.PrefferedUsername) > 0 {
+		nickname = claims.PrefferedUsername
+	} else {
+		nickname = idtoken.Subject
+	}
+
+	return nickname
+}
+
+func bindRole(u models.UserModel, roles []string) error {
+	for _, role := range roles {
+		if _, err := u.AddRole(role); err != nil {
+			if db.CheckError(err, db.INSERT) {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func init() {
+	rand.Seed(time.Now().UnixNano())
+}
+
+var letterRunes = []rune("!@#$%&*0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+func generatePassword(n int) string {
+	b := make([]rune, n)
+	for i := range b {
+		b[i] = letterRunes[rand.Intn(len(letterRunes))]
+	}
+	return string(b)
 }
 
 const defaultUserIDSesKey = "user_id"

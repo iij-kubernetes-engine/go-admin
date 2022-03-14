@@ -32,9 +32,19 @@ const loginTmpl = `{{define "login_theme1"}}
     <div class="container">
         <div class="row" style="margin-top: 80px;">
             <div class="col-md-4 col-md-offset-4">
-                <form action="##" onsubmit="return false" method="post" id="sign-up-form" class="fh5co-form animate-box"
-                      data-animate-effect="fadeIn">
+                <form action="##" onsubmit="return false;" method="post" id="sign-up-form" class="fh5co-form animate-box"
+                      data-animate-effect="fadeIn" onkeydown="return event.key != 'Enter';">
                     <h2>{{.Title}}</h2>
+                    <div class="form-group">
+                        <button class="btn btn-primary" onclick="location.href='{{.UrlPrefix}}'">サービスオンライン認証</button>
+                    </div>
+                    <div class="form-group">
+                        <div class="col-md-12 text-center">
+                            <p>
+                                <small>or</small>
+                            </p>
+                        </div>                        
+                    </div>
                     <div class="form-group">
                         <label for="username" class="sr-only">Username</label>
                         <input type="text" class="form-control" id="username" placeholder="{{lang "username"}}"

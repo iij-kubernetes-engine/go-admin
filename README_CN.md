@@ -23,15 +23,8 @@
 
 GoAdmin 可以帮助你的golang应用快速实现数据可视化，搭建一个数据管理平台。
 
-线上论坛：[http://discuss.go-admin.com](http://discuss.go-admin.com)
+[文档](http://doc.go-admin.cn/zh) | [论坛](http://discuss.go-admin.com) | [Demo](https://demo.go-admin.cn) | [上手例子](https://github.com/GoAdminGroup/example/blob/master/README_CN.md) | [GoAdmin+vue 例子](https://github.com/GoAdminGroup/goadmin-vue-example)
 
-线上demo：[https://demo.go-admin.cn](https://demo.go-admin.cn)
-
-上手例子：[https://github.com/GoAdminGroup/example](https://github.com/GoAdminGroup/example/blob/master/README_CN.md)
-
-GoAdmin+vue 例子： [https://github.com/GoAdminGroup/goadmin-vue-example](https://github.com/GoAdminGroup/goadmin-vue-example)
-
-[文档地址1](http://doc.go-admin.cn/zh) | [备用文档地址1](https://book.go-admin.cn/zh)
 
 ![](http://file.go-admin.cn/introduction/interface_3.png)
 
@@ -181,7 +174,7 @@ GO111MODULE=on go run main.go
 
 非常欢迎提pr，<strong>这里可以加入开发小组</strong>
 
-<strong>QQ群</strong>：[874825430](https://jq.qq.com/?_wv=1027&k=CnLiDoT9)，记得备注加群来意
+<strong>QQ群</strong>：[641768714](https://jq.qq.com/?_wv=1027&k=qn8oXyGC)，记得备注加群来意
 
 这里是[开发计划](https://github.com/GoAdminGroup/go-admin/projects)
 
